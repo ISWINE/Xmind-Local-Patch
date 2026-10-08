@@ -1,71 +1,107 @@
 # Xmind Local Patch
 
-> 面向 Electron 应用的授权机制研究项目。当前针对 **Xmind 26.05.x(Vana-Zen)Windows x64**,实测 `26.05.01107`(便携版 / 安装版均适用)。
-> **零依赖、零后台、可完全还原**——不修改 `Xmind.exe`,不动原版 `app.asar`(自动备份)。
+面向 Electron 应用的逆向工程研究,实现了 Xmind 全部本地功能(pro+)解锁与自动授权,无需登录、无需输入序列号。(实测 v26.05.01107)
 
-## 它做什么
+## 控制流
 
-- ✅ 解锁全部本地 Pro 功能(甘特图 / 演说 / 数学公式 / 高级导出 / 无水印 …)
-- ✅ 去除"升级"按钮、付费墙与水印
-- ✅ 启动自动写入本地授权,**无需登录、无需找激活入口、无需手动输入序列号**
-- ✅ 一键还原原版(`--restore`)
-- ❌ AI 功能(Cloud Copilot 等)为云端服务,不在本地解锁范围
+```text
+patch.js (zero-dependency)
+      │
+      ├─ locate resources/app.asar → backup → app.asar.orig
+      ├─ asar extract (pure node unpacker, 6931 files)
+      │
+      ▼
+renderer patches (static)
+      │
+      ├─ common.js
+      │     ├─ status(d) → computed(() => VALID)
+      │     ├─ perMachineLicenseStatus(w) → VALID
+      │     ├─ checkActivationValid → () => true
+      │     ├─ validatePerMachineLicenseData(k) → VALID
+      │     └─ RSA verify → const a = !0
+      │
+      ├─ 34 activation chunks
+      │     └─ catch → strip server-error guards → offline fallthrough
+      │
+      └─ deploy → resources/app (Electron prefers dir over asar)
 
-## 快速开始
+之后 Xmind.exe 启动
+      │
+      ▼
+loads main/main.js (bytenode stub)
+      │
+      ▼
+xm-neutralize v6 prefix executes
+      │
+      ├─ EPIPE immunity (stdout/stderr)
+      ├─ crypto.createVerify → verify() = true
+      │
+      ▼
+main.bytecode loads (original logic untouched)
+      │
+      ▼
+app ready
+      │
+      ├─ protocol.handle("https")
+      │     ├─ /_res/verify-sme-license  → reject("xm-offline")
+      │     └─ /_api/license-activations → reject("xm-offline")
+      │           (60s 复核走离线容错分支,弹窗诱因消除)
+      │
+      ├─ BrowserWindow.prototype.loadURL
+      │     └─ dialog-license / dialog-enterpassword → close()
+      │
+      ├─ dialog.showMessageBox(Sync)
+      │     └─ license/serial text → swallowed
+      │
+      └─ auto-activation (every window)
+            └─ executeJavaScript
+                  ├─ GET /pinia/store/state
+                  ├─ key present? → return
+                  └─ POST /pinia/store/mutations
+                        └─ updateRawPerMachineLicenseData
+                              └─ { key, email, data } → persisted
+```
 
-### 方式一:Node.js(推荐)
+## License Format
+
+```text
+key 清洗后 225 字符,字符集 [A-Z0-9](Base32 大写表)
+  [0]       'X'                固定魔数
+  [1]       type               A / S(B/C 内嵌公钥为空串)
+  [2..4)    vendorName
+  [4]       majorVersion       jp('H') = 17,须满足 17 + 9 === "26"
+  [5]       minorVersion
+  [6]       licenseeType
+  [7..9)    yearsOfUpgrade
+  [9]       expireMonths       '0' = 永不过期
+  [10..12)  reserved
+  [12..20)  free(签名覆盖)
+  [20..225) signature          RSA-1024-SHA256 的 Base32
+
+signed payload = key[0..20] + email(lowercase) + verifierSuffix(type 定长魔串)
+verify         = crypto.createVerify("RSA-SHA256") against 内嵌 1024-bit PEM
+```
+
+## 安装
 
 ```bat
 node patch.js                :: 自动探测已安装的 Xmind
-node patch.js D:\Xmind       :: 指定目录(便携版解压根目录亦可)
+node patch.js D:\Xmind       :: 指定目录
 node patch.js --restore      :: 还原原版
 ```
 
-### 方式二:没有 Node.js?
+无 Node.js 时双击 `应用补丁.bat`(自动借用 Xmind 自带 Electron 运行时)。
 
-双击 `应用补丁.bat` —— 脚本会优先用系统 Node.js,否则借用 **Xmind 自带的 Electron 运行时**执行补丁(等效 Node 环境),你什么都不用装。
+## Disclaimer
 
-补丁后用 `Xmind.exe` 正常启动即可(便携版继续用你原有的启动方式)。
+本项目仅用于 Electron 应用逆向工程、授权机制分析与软件安全学习。
 
-## 原理(四层)
+Xmind 仅作为研究对象,本项目与 Xmind 官方无关。
 
-| 层 | 修改 | 效果 |
-|---|---|---|
-| 渲染层 `common.js` | 授权状态机恒 VALID / 验签恒通过 / 功能门控总闸恒开 / 序列号校验恒 VALID | 功能全开、无水印、激活框任意输入可过 |
-| 渲染层 34 个激活 chunk | 激活失败强制走**官方离线激活路径** | 激活不依赖网络 |
-| 主进程 `main.js` 前缀注入 | `crypto.createVerify` 中和(revalidate 放行)+ EPIPE 免疫 | 授权跨重启保持、日志不膨胀 |
-| 主进程 `protocol` / `dialog` / `loadURL` 守卫 | 授权复核请求离线化 + 激活窗口事件驱动拦截 | 消除"请输入有效序列号"弹窗诱因 |
+## Credits
 
-技术细节(含 license 格式还原:225 字符 Base32 / RSA-1024-SHA256 / header 结构)见本仓库 Wiki 或作者的完整逆向报告。
-
-## 兼容性
-
-| Xmind 版本 | 状态 |
-|---|---|
-| 26.05.01107 | ✅ 完整实测 |
-| 26.05.01106 | ✅ 结构一致(理论上兼容,欢迎反馈) |
-| 其它 26.05.x | 大概率兼容——补丁基于稳定字面量而非内存偏移;若失效请提 issue 附版本号 |
-| 更早/更新大版本 | 未验证 |
-
-与 native hook 方案(如 DLL 代理类项目)相比:本方案**不依赖内存偏移**,版本漂移鲁棒性强;代价是需要写 `resources/app` 目录(原版 `app.asar` 自动备份为 `app.asar.orig`)。
-
-## 常见问题
-
-**Q: 会弹"请输入有效序列号"吗?**
-不会。该弹窗由主进程 60s 授权复核失败(服务端 404)触发,v6 补丁已将其诱因离线化并加了窗口/消息框双重拦截。
-
-**Q: UserData 会变大吗?**
-正常 ~15MB。若出现 GB 级日志(`vana\log\app_*.log`),直接删除即可(仅调试性管道启动会诱发,已内置 EPIPE 免疫)。
-
-**Q: 如何还原?**
-`node patch.js --restore`,或双击 `还原原版.bat`。
-
-**Q: 升级 Xmind 后失效?**
-重跑 `patch.js` 即可(脚本会重新解包新的 app.asar 并应用)。
-
-## 免责声明
-
-本项目仅用于 Electron 应用逆向工程研究、授权机制分析与软件安全学习。请在 24 小时内于研究后自行删除,如需继续使用 Xmind 请购买正版。本项目与 Xmind 官方无关,使用者自行承担一切责任。
+- [lwtw123456/Xmind-Hack](https://github.com/lwtw123456/Xmind-Hack) — native hook 路线的同类研究,本项目 `protocol.handle` 拦截思路受其启发
+- bytenode — 主进程字节码保护结构分析对象
 
 ## License
 

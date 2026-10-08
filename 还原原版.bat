@@ -1,0 +1,23 @@
+@echo off
+chcp 65001 >nul
+title Xmind Local Patch - Restore
+cd /d "%~dp0"
+
+where node >nul 2>nul
+if %errorlevel%==0 (
+  node patch.js %* --restore
+  goto :done
+)
+set "XM="
+if exist "%~dp0Xmind\Xmind.exe" set "XM=%~dp0Xmind\Xmind.exe"
+if exist "%LOCALAPPDATA%\Programs\Xmind\Xmind.exe" set "XM=%LOCALAPPDATA%\Programs\Xmind\Xmind.exe"
+if "%XM%"=="" (
+  echo [X] 未找到 Node.js 也未找到 Xmind。
+  goto :done
+)
+set ELECTRON_RUN_AS_NODE=1
+"%XM%" patch.js %* --restore
+
+:done
+echo.
+pause
